@@ -2,11 +2,16 @@ import os
 import asyncio
 import threading
 import requests
-from flask import Flask
 
+from flask import Flask
 from dotenv import load_dotenv
+
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
 
 load_dotenv()
 
@@ -15,177 +20,424 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN missing")
+
 if not GITHUB_TOKEN:
     raise RuntimeError("GITHUB_TOKEN missing")
 
+
 API = "https://api.github.com"
+
 HEADERS = {
     "Accept": "application/vnd.github+json",
     "Authorization": f"Bearer {GITHUB_TOKEN}",
     "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "GitHub-Finder-Telegram-Bot",
 }
 
-# --- Flask app for Render health checks ---
+
 web_app = Flask(__name__)
 
-@web_app.route('/')
-@web_app.route('/health')
+
+@web_app.route("/")
+@web_app.route("/health")
 def health():
     return "OK", 200
 
-# --- Your existing GitHub logic (unchanged) ---
+
 def github_get(url, params=None):
-    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
-    if r.status_code != 200:
+    response = requests.get(
+        url,
+        headers=HEADERS,
+        params=params,
+        timeout=30,
+    )
+
+    if response.status_code != 200:
         try:
-            msg = r.json().get("message", r.text)
+            data = response.json()
+            message = data.get("message", response.text)
         except Exception:
-            msg = r.text
-        raise Exception(f"GitHub API {r.status_code}: {msg}")
-    return r.json()
+            message = response.text
+
+        raise Exception(
+            f"GitHub API {response.status_code}: {message}"
+        )
+
+    return response.json()
+
 
 def search_exact_content(query):
     results = {}
-    data = github_get(f"{API}/search/code", {"q": f'"{query}"', "per_page": 100})
+
+    data = github_get(
+        f"{API}/search/code",
+        {
+            "q": f'"{query}"',
+            "per_page": 100,
+        },
+    )
+
     for item in data.get("items", []):
         repo = item.get("repository", {})
+
         repo_name = repo.get("full_name")
         repo_url = repo.get("html_url")
         path = item.get("path")
+
         if not repo_name or not repo_url or not path:
             continue
+
         branch = repo.get("default_branch", "main")
+
         try:
-            file_data = github_get(f"{API}/repos/{repo_name}/contents/{path}", {"ref": branch})
+            file_data = github_get(
+                f"{API}/repos/{repo_name}/contents/{path}",
+                {"ref": branch},
+            )
+
             download_url = file_data.get("download_url")
+
             if not download_url:
                 continue
-            r = requests.get(download_url, timeout=20)
-            if r.status_code != 200:
+
+            response = requests.get(
+                download_url,
+                timeout=20,
+            )
+
+            if response.status_code != 200:
                 continue
-            if query in r.text:
+
+            if query in response.text:
                 results[repo_name] = repo_url
+
         except Exception:
             continue
+
     return results
+
 
 def search_filename(filename):
     results = {}
-    data = github_get(f"{API}/search/code", {"q": f"filename:{filename}", "per_page": 100})
+
+    data = github_get(
+        f"{API}/search/code",
+        {
+            "q": f"filename:{filename}",
+            "per_page": 100,
+        },
+    )
+
     search_term = filename.lower()
+
     for item in data.get("items", []):
         path = item.get("path", "")
         actual_filename = path.split("/")[-1]
+
         if search_term not in actual_filename.lower():
             continue
+
         repo = item.get("repository", {})
+
         repo_name = repo.get("full_name")
         repo_url = repo.get("html_url")
+
         if repo_name and repo_url:
             results[repo_name] = repo_url
+
     return results
+
 
 def search_advrepo(name):
     results = {}
-    data = github_get(f"{API}/search/repositories", {"q": f"{name} in:name", "per_page": 100})
-    search_term = name.lower()
-    for repo in data.get("items", []):
-        actual_name = repo.get("name", "")
-        url = repo.get("html_url")
-        if search_term not in actual_name.lower():
-            continue
-        if actual_name and url:
-            results[actual_name] = url
-    return results
 
-async def send_results(update, results):
-    if not results:
-        await update.message.reply_text("❌ Koi match nahi mila.")
-        return
-    text = ""
-    for name, url in results.items():
-        line = f"📁 {name}\n🔗 {url}\n\n"
-        if len(text) + len(line) > 3800:
-            await update.message.reply_text(text, disable_web_page_preview=True)
-            text = ""
-        text += line
-    if text:
-        await update.message.reply_text(text, disable_web_page_preview=True)
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 GitHub Finder\n\n"
-        "🔒 Exact content:\n/repo mynk\n\n"
-        "📄 Similar filename:\n/filename bomber.py\n\n"
-        "📁 Similar repository name:\n/advrepo mynk-api"
+    data = github_get(
+        f"{API}/search/repositories",
+        {
+            "q": f"{name} in:name",
+            "per_page": 100,
+        },
     )
 
-async def repo_command(update, context):
-    if not context.args:
-        await update.message.reply_text("Usage:\n/repo mynk")
+    search_term = name.lower()
+
+    for repo in data.get("items", []):
+        actual_name = repo.get("name", "")
+        repo_url = repo.get("html_url")
+
+        if search_term not in actual_name.lower():
+            continue
+
+        if actual_name and repo_url:
+            results[actual_name] = repo_url
+
+    return results
+
+
+async def send_results(
+    update: Update,
+    results,
+):
+    if not results:
+        await update.message.reply_text(
+            "❌ Koi match nahi mila."
+        )
         return
+
+    text = ""
+
+    for name, url in results.items():
+        line = (
+            f"📁 {name}\n"
+            f"🔗 {url}\n\n"
+        )
+
+        if len(text) + len(line) > 3800:
+            if text:
+                await update.message.reply_text(
+                    text,
+                    disable_web_page_preview=True,
+                )
+
+            text = ""
+
+        text += line
+
+    if text:
+        await update.message.reply_text(
+            text,
+            disable_web_page_preview=True,
+        )
+
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await update.message.reply_text(
+        "🤖 GitHub Finder\n\n"
+        "🔒 Exact content:\n"
+        "/repo mynk\n\n"
+        "📄 Similar filename:\n"
+        "/filename bomber.py\n\n"
+        "📁 Similar repository name:\n"
+        "/advrepo mynk-api"
+    )
+
+
+async def repo_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if not context.args:
+        await update.message.reply_text(
+            "Usage:\n/repo mynk"
+        )
+        return
+
     query = " ".join(context.args).strip()
-    status = await update.message.reply_text(f"🔎 Exact content search...\n\nQuery: {query}")
+
+    if not query:
+        await update.message.reply_text(
+            "Usage:\n/repo mynk"
+        )
+        return
+
+    status = await update.message.reply_text(
+        f"🔎 Exact content search...\n\n"
+        f"Query: {query}"
+    )
+
     try:
-        results = await asyncio.to_thread(search_exact_content, query)
-    except Exception as e:
-        await status.edit_text(f"❌ Error:\n{e}")
+        results = await asyncio.to_thread(
+            search_exact_content,
+            query,
+        )
+    except Exception as error:
+        await status.edit_text(
+            f"❌ Error:\n{error}"
+        )
         return
+
     if not results:
-        await status.edit_text(f"❌ Exact match nahi mila.\n\nQuery: {query}")
+        await status.edit_text(
+            f"❌ Exact match nahi mila.\n\n"
+            f"Query: {query}"
+        )
         return
-    await status.edit_text(f"✅ Exact matches: {len(results)}\n\nQuery: {query}")
+
+    await status.edit_text(
+        f"✅ Exact matches: {len(results)}\n\n"
+        f"Query: {query}"
+    )
+
     await send_results(update, results)
 
-async def filename_command(update, context):
+
+async def filename_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     if not context.args:
-        await update.message.reply_text("Usage:\n/filename bomber.py")
+        await update.message.reply_text(
+            "Usage:\n/filename bomber.py"
+        )
         return
+
     filename = " ".join(context.args).strip()
-    status = await update.message.reply_text(f"🔎 Filename search...\n\nQuery: {filename}")
+
+    if not filename:
+        await update.message.reply_text(
+            "Usage:\n/filename bomber.py"
+        )
+        return
+
+    status = await update.message.reply_text(
+        f"🔎 Filename search...\n\n"
+        f"Query: {filename}"
+    )
+
     try:
-        results = await asyncio.to_thread(search_filename, filename)
-    except Exception as e:
-        await status.edit_text(f"❌ Error:\n{e}")
+        results = await asyncio.to_thread(
+            search_filename,
+            filename,
+        )
+    except Exception as error:
+        await status.edit_text(
+            f"❌ Error:\n{error}"
+        )
         return
+
     if not results:
-        await status.edit_text(f"❌ Similar filename nahi mila.\n\nQuery: {filename}")
+        await status.edit_text(
+            f"❌ Similar filename nahi mila.\n\n"
+            f"Query: {filename}"
+        )
         return
-    await status.edit_text(f"✅ Filename matches: {len(results)}\n\nQuery: {filename}")
+
+    await status.edit_text(
+        f"✅ Filename matches: {len(results)}\n\n"
+        f"Query: {filename}"
+    )
+
     await send_results(update, results)
 
-async def advrepo_command(update, context):
+
+async def advrepo_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     if not context.args:
-        await update.message.reply_text("Usage:\n/advrepo mynk-api")
+        await update.message.reply_text(
+            "Usage:\n/advrepo mynk-api"
+        )
         return
+
     name = " ".join(context.args).strip()
-    status = await update.message.reply_text(f"🔎 Repository name search...\n\nQuery: {name}")
+
+    if not name:
+        await update.message.reply_text(
+            "Usage:\n/advrepo mynk-api"
+        )
+        return
+
+    status = await update.message.reply_text(
+        f"🔎 Repository name search...\n\n"
+        f"Query: {name}"
+    )
+
     try:
-        results = await asyncio.to_thread(search_advrepo, name)
-    except Exception as e:
-        await status.edit_text(f"❌ Error:\n{e}")
+        results = await asyncio.to_thread(
+            search_advrepo,
+            name,
+        )
+    except Exception as error:
+        await status.edit_text(
+            f"❌ Error:\n{error}"
+        )
         return
+
     if not results:
-        await status.edit_text(f"❌ Similar repository nahi mila.\n\nQuery: {name}")
+        await status.edit_text(
+            f"❌ Similar repository nahi mila.\n\n"
+            f"Query: {name}"
+        )
         return
-    await status.edit_text(f"✅ Repository matches: {len(results)}\n\nQuery: {name}")
+
+    await status.edit_text(
+        f"✅ Repository matches: {len(results)}\n\n"
+        f"Query: {name}"
+    )
+
     await send_results(update, results)
+
 
 def run_bot():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("repo", repo_command))
-    app.add_handler(CommandHandler("filename", filename_command))
-    app.add_handler(CommandHandler("advrepo", advrepo_command))
-    print("🤖 GitHub Finder started...")
-    app.run_polling()
+    async def bot_main():
+        bot_app = (
+            Application.builder()
+            .token(BOT_TOKEN)
+            .build()
+        )
 
-# --- Entry point ---
+        bot_app.add_handler(
+            CommandHandler("start", start)
+        )
+
+        bot_app.add_handler(
+            CommandHandler("repo", repo_command)
+        )
+
+        bot_app.add_handler(
+            CommandHandler("filename", filename_command)
+        )
+
+        bot_app.add_handler(
+            CommandHandler("advrepo", advrepo_command)
+        )
+
+        print("🤖 GitHub Finder started...")
+
+        await bot_app.initialize()
+        await bot_app.start()
+
+        if bot_app.updater is None:
+            raise RuntimeError(
+                "Telegram updater is not available"
+            )
+
+        await bot_app.updater.start_polling()
+
+        try:
+            await asyncio.Event().wait()
+        finally:
+            print("🛑 Stopping Telegram bot...")
+
+            await bot_app.updater.stop()
+            await bot_app.stop()
+            await bot_app.shutdown()
+
+    asyncio.run(bot_main())
+
+
 if __name__ == "__main__":
-    # Start bot in a background thread
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread = threading.Thread(
+        target=run_bot,
+        daemon=True,
+    )
+
     bot_thread.start()
-    
-    # Start Flask on the port Render gives us
-    port = int(os.environ.get("PORT", 8080))
-    web_app.run(host="0.0.0.0", port=port)
+
+    port = int(
+        os.environ.get("PORT", "8080")
+    )
+
+    print(
+        f"🌐 Health server running on port {port}"
+    )
+
+    web_app.run(
+        host="0.0.0.0",
+        port=port,
+        threaded=True,
+    )
